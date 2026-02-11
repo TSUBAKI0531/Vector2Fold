@@ -8,3 +8,6 @@ requests
 py3Dmol
 stmol
 ipython-genutils
+dna_features_viewer
+XlsxWriter
+matplotlib

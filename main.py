@@ -1,195 +1,146 @@
 import streamlit as st
 import pandas as pd
-import torch
 import requests
-import numpy as np
+import io
+import matplotlib.pyplot as plt
 from Bio import SeqIO
-from io import StringIO
-from transformers import AutoTokenizer, EsmModel
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
+from Bio.Restriction import Analysis, AllEnzymes
+from dna_features_viewer import BiopythonTranslator
 import py3Dmol
 from stmol import showmol
 
-# --- ページ設定 ---
-st.set_page_config(page_title="Vector2Fold - Protein Predictor", layout="wide", page_icon="🧬")
-
-# --- モデルのキャッシュ ---
-@st.cache_resource
-def load_models():
-    # CPU環境での動作を想定（GPUがある場合は "cuda" に変更可能）
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_name = "facebook/esm2_t6_8M_UR50D"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = EsmModel.from_pretrained(model_name).to(device)
-    return tokenizer, model, device
-
-# --- 関数群 ---
-def translate_dna(dna_sequence):
-    from Bio.Seq import Seq
-    # 簡易的に最初のストップコドンまでを翻訳
-    return str(Seq(dna_sequence).translate(to_stop=True))
-
-def predict_solubility(protein_seq, tokenizer, model, device):
-    # 特徴抽出による簡易スコアリング
-    inputs = tokenizer(protein_seq, return_tensors="pt", padding=True, truncation=True).to(device)
-    with torch.no_grad():
-        outputs = model(**inputs)
-        embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
-    # デモ用の擬似スコア（実際は学習済みモデルが必要）
-    score = np.tanh(embeddings.mean()) * 50 + 50
-    return float(score)
+# --- 既存の解析関数 ---
 
 def get_esmfold_data(protein_seq):
-    """
-    ESMFold APIからPDBデータと平均pLDDTを取得する。
-    pLDDTが0.0-1.0スケールの場合は自動的に0-100スケールへ正規化する。
-    """
     url = "https://api.esmatlas.com/foldSequence/v1/pdb/"
     try:
-        # 配列長制限（ESMFold APIの制限に合わせる）
         if len(protein_seq) > 1000:
-             return None, None, "Sequence too long for API (>1000 AA)"
-
+            return None, None, "Sequence too long (>1000 AA)"
         response = requests.post(url, data=protein_seq, timeout=120)
-        
         if response.status_code == 200:
             pdb_text = response.text
-            # PDBのB-factor列(60-66文字目)から各残基のpLDDTを取得
             plddt_values = [float(line[60:66].strip()) for line in pdb_text.splitlines() if line.startswith("ATOM")]
-            
-            if not plddt_values:
-                return pdb_text, None, "No pLDDT data found in PDB"
-
-            # --- 自動正規化ロジックの開始 ---
-            # 最大値が 1.0 以下の場合は、APIが小数スケールで返していると判断
-            max_plddt = max(plddt_values)
-            if max_plddt <= 1.0:
-                # すべての値を100倍して 0-100 の範囲に変換
+            if plddt_values and max(plddt_values) <= 1.0:
                 plddt_values = [v * 100 for v in plddt_values]
-            # --- 自動正規化ロジックの終了 ---
-
-            # 平均値を計算
-            avg_plddt = sum(plddt_values) / len(plddt_values)
-            
+            avg_plddt = sum(plddt_values) / len(plddt_values) if plddt_values else None
             return pdb_text, avg_plddt, "Success"
-        else:
-            return None, None, f"API Error: {response.status_code}"
-            
+        return None, None, f"API Error: {response.status_code}"
     except Exception as e:
         return None, None, str(e)
-    
+
 def render_mol(pdb_data):
-    """py3Dmolを使って構造を表示する設定"""
     view = py3Dmol.view(width=800, height=600)
     view.addModel(pdb_data, 'pdb')
-    view.setStyle({'cartoon': {'color': 'spectrum'}})
-    # pLDDTに基づいた色付け（青=高信頼度(90), 赤=低信頼度(50)）
-    view.setStyle({'cartoon': {'colorscheme': {'prop':'b','gradient': 'roygb','min':0.5, 'max':0.9}}})
+    view.setStyle({'cartoon': {'colorscheme': {'prop':'b', 'gradient': 'roygb', 'min': 50, 'max': 90}}})
     view.zoomTo()
     return view
 
-# --- UIセクション ---
-st.title("🧬 Vector2Fold: 構造予測 & 可視化")
-st.markdown("""
-DNA配列からタンパク質の溶解性とフォールディングを予測します。
-ESMFoldによって予測された3D構造は、pLDDTスコア（信頼度）に基づいて色分け表示されます。
-(青: 高信頼度 > 緑 > 黄 > 赤: 低信頼度/ディスオーダー領域)
-""")
+# --- 新規：ベクター設計・出力用関数 ---
 
-# サイドバー
-st.sidebar.header("Input Settings")
-input_mode = st.sidebar.radio("入力方法:", ["テキスト入力", "FASTAファイルアップロード"])
+def generate_vector_map(sequence, label="New Vector"):
+    record = SeqRecord(Seq(sequence), id="Vector", name=label)
+    # 仮の特徴量（Insert部分）を目立たせるための設定
+    translator = BiopythonTranslator()
+    graphic_record = translator.translate_record(record)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    graphic_record.plot(ax=ax, with_ruler=True)
+    return fig
 
-dna_input = ""
-if input_mode == "テキスト入力":
-    dna_input = st.text_area("DNA塩基配列を入力 (複数可, FASTA形式):", height=200, placeholder=">Seq1\nATGGCC...")
-else:
-    uploaded_file = st.sidebar.file_uploader("FASTAファイルを選択", type=["fasta", "fa"])
-    if uploaded_file:
-        dna_input = uploaded_file.getvalue().decode("utf-8")
-
-# 解析実行
-if st.button("解析開始", type="primary"):
-    if not dna_input or not ">" in dna_input:
-        st.error("有効なFASTA形式の配列を入力してください。")
-    else:
-        # モデルロード（キャッシュ使用）
-        with st.spinner("モデルを準備中..."):
-            tokenizer, model, device = load_models()
+def export_to_excel(dna_seq, protein_seq, plddt, map_fig):
+    output = io.BytesIO()
+    map_img = io.BytesIO()
+    map_fig.savefig(map_img, format='png', bbox_inches='tight')
+    
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df = pd.DataFrame({
+            "項目": ["DNA配列長", "タンパク質配列", "予測平均pLDDT"],
+            "値": [len(dna_seq), protein_seq, plddt]
+        })
+        df.to_excel(writer, sheet_name='解析レポート', index=False)
         
-        results = []
-        fasta_io = StringIO(dna_input)
-        records = list(SeqIO.parse(fasta_io, "fasta"))
+        # 配列詳細シート
+        df_seq = pd.DataFrame({"DNA配列": [dna_seq]})
+        df_seq.to_excel(writer, sheet_name='配列詳細', index=False)
         
-        if not records:
-             st.error("配列が見つかりませんでした。")
-        else:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            # 各配列の解析ループ
-            for i, record in enumerate(records):
-                status_text.text(f"解析中 ({i+1}/{len(records)}): {record.id}...")
-                protein_seq = translate_dna(str(record.seq))
-                
-                # 予測実行
-                sol_score = predict_solubility(protein_seq, tokenizer, model, device)
-                pdb_data, plddt, api_status = get_esmfold_data(protein_seq)
-                
-                verdict = "✅ Confident" if plddt and plddt >= 70 else "⚠️ Caution/Disordered"
-                if not plddt: verdict = f"❌ Failed ({api_status})"
-                
-                results.append({
-                    "ID": record.id,
-                    "Length": len(protein_seq),
-                    "Solubility": f"{sol_score:.1f}",
-                    "pLDDT": f"{plddt:.1f}" if plddt else "N/A",
-                    "Verdict": verdict,
-                    "PDB_Data": pdb_data # 構造データを保持
-                })
-                progress_bar.progress((i + 1) / len(records))
-            
-            status_text.empty()
-            progress_bar.empty()
-            st.success("解析完了！")
+        # 画像の挿入
+        worksheet = writer.sheets['解析レポート']
+        worksheet.insert_image('D2', 'map.png', {'image_data': map_img})
+        
+    return output.getvalue()
 
-            # 結果のDataFrame化と表示
-            df = pd.DataFrame(results)
-            st.subheader("📊 解析結果一覧")
-            st.dataframe(df.drop(columns=["PDB_Data"]), use_container_width=True) # PDBデータはテーブルには表示しない
+# --- Streamlit UI ---
 
-            st.divider()
+st.set_page_config(page_title="Vector2Fold - Integrated Pipeline", layout="wide")
+st.title("🧬 Vector2Fold: ベクター設計 & 構造予測パイプライン")
 
-            # --- 3D構造ビューワーセクション ---
-            st.subheader("🧊 3D構造ビューワー")
+# サイドバー：ファイルアップロード
+st.sidebar.header("1. 配列データの読み込み")
+gene_file = st.sidebar.file_uploader("目的遺伝子 (Insert) FASTA/GB", type=["fasta", "gb", "txt"])
+vector_file = st.sidebar.file_uploader("ベクター (Backbone) FASTA/GB", type=["fasta", "gb", "txt"])
+
+if gene_file and vector_file:
+    # 配列の読み込み
+    gene_rec = SeqIO.read(io.StringIO(gene_file.getvalue().decode("utf-8")), "fasta")
+    vector_rec = SeqIO.read(io.StringIO(vector_file.getvalue().decode("utf-8")), "fasta")
+    
+    st.subheader("Step 1: インシリコ・クローニング")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info(f"目的遺伝子: {gene_rec.id} ({len(gene_rec.seq)} bp)")
+        st.info(f"バックボーン: {vector_rec.id} ({len(vector_rec.seq)} bp)")
+        
+        # 制限酵素解析
+        analysis = Analysis(AllEnzymes, vector_rec.seq)
+        unique_sites = list(analysis.unique_sites().keys())
+        selected_site = st.selectbox("挿入に使用するユニーク制限酵素サイトの候補:", unique_sites)
+        
+        insert_pos = st.number_input("挿入開始位置 (bp) ※手動調整", value=0, max_value=len(vector_rec.seq))
+        
+    # クローニング後の配列生成
+    final_dna_seq = vector_rec.seq[:insert_pos] + gene_rec.seq + vector_rec.seq[insert_pos:]
+    
+    with col2:
+        st.write("新ベクターマップ（簡易表示）")
+        fig = generate_vector_map(str(final_dna_seq))
+        st.pyplot(fig)
+
+    st.divider()
+    st.subheader("Step 2: タンパク質翻訳 & 構造予測")
+    
+    # 翻訳（目的遺伝子部分を想定して翻訳）
+    protein_seq = str(gene_rec.seq.translate(to_stop=True))
+    st.text_area("翻訳されたアミノ酸配列", protein_seq, height=100)
+    
+    if st.button("構造解析を開始"):
+        with st.spinner("ESMFoldで構造を予測中..."):
+            pdb_data, plddt, msg = get_esmfold_data(protein_seq)
             
-            # PDBデータ取得に成功した配列のみを選択肢にする
-            available_structures = df[df["PDB_Data"].notnull()]
-            
-            if not available_structures.empty:
-                selected_id = st.selectbox(
-                    "表示するタンパク質を選択してください:",
-                    available_structures["ID"].tolist()
-                )
-                
-                # 選択されたIDに対応するPDBデータを取得
-                selected_pdb = available_structures[available_structures["ID"] == selected_id]["PDB_Data"].iloc[0]
-                selected_plddt = available_structures[available_structures["ID"] == selected_id]["pLDDT"].iloc[0]
-
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    # py3Dmolによるレンダリング表示
-                    view = render_mol(selected_pdb)
-                    showmol(view, height=500)
-                    st.caption("マウス操作: 回転(左ドラッグ), ズーム(ホイール), 移動(右ドラッグ)")
-                with col2:
-                    st.metric("選択中の配列 pLDDT", selected_plddt)
-                    st.info("青色が濃いほど予測の信頼度が高く、安定した構造を形成する可能性が高い領域です。赤色はディスオーダー領域や柔軟性が高い領域を示唆します。")
-                    # PDBダウンロードボタン
+            if pdb_data:
+                res_col1, res_col2 = st.columns([1, 2])
+                with res_col1:
+                    st.metric("平均 pLDDT", f"{plddt:.2f}")
+                    if plddt > 70:
+                        st.success("高い信頼度で構造が予測されました。")
+                    else:
+                        st.warning("信頼度が低いため、天然変性領域の可能性があります。")
+                    
+                    # Excelダウンロード
+                    excel_data = export_to_excel(str(final_dna_seq), protein_seq, plddt, fig)
                     st.download_button(
-                        label="PDBファイルをダウンロード",
-                        data=selected_pdb,
-                        file_name=f"{selected_id}_predicted.pdb",
-                        mime="chemical/x-pdb"
+                        label="解析結果をExcelでダウンロード",
+                        data=excel_data,
+                        file_name="Vector2Fold_Report.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
+                
+                with res_col2:
+                    st.write("予測3D構造 (Color by pLDDT)")
+                    showmol(render_mol(pdb_data), height=500, width=700)
             else:
-                st.warning("表示可能な3D構造データがありません。")
+                st.error(f"解析に失敗しました: {msg}")
+
+else:
+    st.write("サイドバーから目的遺伝子とベクターの配列ファイルをアップロードしてください。")
