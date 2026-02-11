@@ -7,10 +7,15 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from Bio.Restriction import Analysis, AllEnzymes
+# 修正: Analysis, AllEnzymes に加えて、主要な制限酵素を個別にインポート
+from Bio.Restriction import Analysis, AllEnzymes, RestrictionBatch, EcoRI, BamHI, HindIII, NotI, XhoI, SpeI, PstI, NcoI, NdeI, SalI, KpnI, SacI, SmaI
 from dna_features_viewer import BiopythonTranslator, CircularGraphicRecord
 import py3Dmol
 from stmol import showmol
+
+# --- 設定: 主要な制限酵素のリスト ---
+# クローニングで頻繁に使われる酵素を定義します。必要に応じて追加・削除してください。
+MajorEnzymes = RestrictionBatch([EcoRI, BamHI, HindIII, NotI, XhoI, SpeI, PstI, NcoI, NdeI, SalI, KpnI, SacI, SmaI])
 
 # --- 予測・描画ロジック ---
 
@@ -22,10 +27,10 @@ def get_esmfold_data(protein_seq):
         response = requests.post(url, data=protein_seq, timeout=120)
         if response.status_code == 200:
             pdb_text = response.text
+            # PDBデータ内のpLDDTスコア(b-factor)は0.0-1.0のスケール
             plddt_values = [float(line[60:66].strip()) for line in pdb_text.splitlines() if line.startswith("ATOM")]
-            if plddt_values and max(plddt_values) <= 1.0:
-                plddt_values = [v * 100 for v in plddt_values]
-            avg_plddt = sum(plddt_values) / len(plddt_values) if plddt_values else None
+            # 表示用の平均スコアは0-100スケールに変換
+            avg_plddt = (sum(plddt_values) / len(plddt_values)) * 100 if plddt_values else None
             return pdb_text, avg_plddt, "Success"
         return None, None, f"API Error: {response.status_code}"
     except Exception as e:
@@ -34,12 +39,14 @@ def get_esmfold_data(protein_seq):
 def render_mol(pdb_data):
     view = py3Dmol.view(width=800, height=600)
     view.addModel(pdb_data, 'pdb')
-    view.setStyle({'cartoon': {'colorscheme': {'prop':'b', 'gradient': 'roygb', 'min': 50, 'max': 90}}})
+    # 【修正】pLDDTのスケールを0.0-1.0に合わせて設定
+    # 0.5以下:赤, 0.7付近:黄/緑, 0.9以上:青 のグラデーション
+    view.setStyle({'cartoon': {'colorscheme': {'prop':'b', 'gradient': 'roygb', 'min': 0.5, 'max': 0.9}}})
     view.zoomTo()
     return view
 
 def generate_vector_map(final_seq, insert_pos, insert_len, analysis_results=None, label="New_Construct"):
-    """円形マップにアノテーションと制限酵素サイトを表示する"""
+    """円形マップにアノテーションと主要な制限酵素サイトを表示する"""
     record = SeqRecord(Seq(final_seq), id="Vector", name=label)
     features = []
     
@@ -48,12 +55,12 @@ def generate_vector_map(final_seq, insert_pos, insert_len, analysis_results=None
     features.append(SeqFeature(FeatureLocation(insert_pos, insert_pos + insert_len), type="insert", qualifiers={"label": "TARGET GENE", "color": "#ffaa00"}))
     features.append(SeqFeature(FeatureLocation(insert_pos + insert_len, len(final_seq)), type="backbone", qualifiers={"label": "Backbone_B", "color": "#f4f4f4"}))
     
-    # 制限酵素サイトの自動プロット
+    # 制限酵素サイトの自動プロット（主要酵素のみ）
     if analysis_results:
         for enzyme, cuts in analysis_results.items():
-            if len(cuts) == 1:
+            # 【修正】主要酵素リストに含まれ、かつユニークなサイトのみ表示
+            if enzyme in MajorEnzymes and len(cuts) == 1:
                 pos = cuts[0]
-                # 挿入位置より後ろにあるサイトは、インサートの長さ分だけ位置をずらす
                 actual_pos = pos if pos <= insert_pos else pos + insert_len
                 features.append(SeqFeature(FeatureLocation(actual_pos-1, actual_pos), type="restriction_site", qualifiers={"label": str(enzyme), "color": "#d62728"}))
     
@@ -62,6 +69,7 @@ def generate_vector_map(final_seq, insert_pos, insert_len, analysis_results=None
     graphic_record = translator.translate_record(record)
     
     circular_rec = CircularGraphicRecord(sequence_length=len(final_seq), features=graphic_record.features)
+    # ラベルが重ならないように調整
     fig, ax = plt.subplots(figsize=(10, 10))
     circular_rec.plot(ax=ax)
     return fig
@@ -105,13 +113,15 @@ if gene_file and vector_file:
             st.info(f"目的遺伝子: {gene_rec.id} ({len(gene_rec.seq)} bp)")
             st.info(f"バックボーン: {vector_rec.id} ({len(vector_rec.seq)} bp)")
             
+            # 全酵素で解析を行い、ユニークサイトを抽出
             analysis = Analysis(AllEnzymes, vector_rec.seq)
             all_cuts = analysis.full()
+            
+            # 選択肢には、主要酵素かどうかに関わらず全てのユニークサイトを表示
             unique_sites = sorted([str(enzyme) for enzyme, cuts in all_cuts.items() if len(cuts) == 1])
             
             if unique_sites:
                 selected_site = st.selectbox("利用可能なユニーク制限酵素サイト:", unique_sites)
-                # 選択された酵素の切断位置をデフォルトの挿入位置として提案
                 target_enzyme = [e for e in AllEnzymes if str(e) == selected_site][0]
                 suggested_pos = target_enzyme.search(vector_rec.seq)[0]
                 insert_pos = st.number_input("挿入位置 (bp) の指定", value=suggested_pos, max_value=len(vector_rec.seq))
@@ -122,7 +132,8 @@ if gene_file and vector_file:
         final_dna_seq = str(vector_rec.seq[:insert_pos]) + str(gene_rec.seq) + str(vector_rec.seq[insert_pos:])
         
         with col2:
-            st.write("プレビュー: 合成後のベクターマップ (制限酵素サイト付き)")
+            st.write("プレビュー: 合成後のベクターマップ (主要な制限酵素サイトを表示)")
+            # マップ生成関数に全解析結果を渡す（関数内でフィルタリングされる）
             fig = generate_vector_map(final_dna_seq, insert_pos, len(gene_rec.seq), all_cuts)
             st.pyplot(fig)
 
