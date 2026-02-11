@@ -6,10 +6,10 @@ import matplotlib.pyplot as plt
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
-# 追加：配列に意味付け（特徴量）を付与するためのモジュール
 from Bio.SeqFeature import SeqFeature, FeatureLocation
 from Bio.Restriction import Analysis, AllEnzymes
-from dna_features_viewer import BiopythonTranslator
+# 修正：CircularGraphicRecord を追加インポート
+from dna_features_viewer import BiopythonTranslator, CircularGraphicRecord
 import py3Dmol
 from stmol import showmol
 
@@ -35,30 +35,34 @@ def get_esmfold_data(protein_seq):
 def render_mol(pdb_data):
     view = py3Dmol.view(width=800, height=600)
     view.addModel(pdb_data, 'pdb')
-    # 色分け基準: 50(赤)〜90(青)のグラデーション
+    # pLDDTに基づいた色分け: 50(赤)〜90(青)
     view.setStyle({'cartoon': {'colorscheme': {'prop':'b', 'gradient': 'roygb', 'min': 50, 'max': 90}}})
     view.zoomTo()
     return view
 
 def generate_vector_map(final_seq, insert_pos, insert_len, label="New_Construct"):
-    """配列にアノテーションを付与し、円形マップを描画する"""
+    """円形マップを正しく生成する"""
     record = SeqRecord(Seq(final_seq), id="Vector", name=label)
     
-    # 1. バックボーン部分（前半）
+    # 特徴量（アノテーション）の定義
     feat1 = SeqFeature(FeatureLocation(0, insert_pos), type="backbone", qualifiers={"label": "Backbone_A", "color": "#f4f4f4"})
-    # 2. 目的遺伝子（インサート）部分：オレンジ色で強調
     feat2 = SeqFeature(FeatureLocation(insert_pos, insert_pos + insert_len), type="insert", qualifiers={"label": "TARGET GENE", "color": "#ffaa00"})
-    # 3. バックボーン部分（後半）
     feat3 = SeqFeature(FeatureLocation(insert_pos + insert_len, len(final_seq)), type="backbone", qualifiers={"label": "Backbone_B", "color": "#f4f4f4"})
-    
     record.features = [feat1, feat2, feat3]
     
+    # Translatorを使って標準的なGraphicRecordを一度作成し、特徴量を抽出
     translator = BiopythonTranslator()
     graphic_record = translator.translate_record(record)
     
-    # 円形マップとして描画
+    # 【重要】円形マップ専用のクラスに変換
+    circular_rec = CircularGraphicRecord(
+        sequence_length=len(final_seq),
+        features=graphic_record.features
+    )
+    
     fig, ax = plt.subplots(figsize=(8, 8))
-    graphic_record.plot_circular(ax=ax, with_ruler=True)
+    # plot() を呼び出すと、CircularGraphicRecord なので円形に描画される
+    circular_rec.plot(ax=ax)
     return fig
 
 def export_to_excel(dna_seq, protein_seq, plddt, map_fig):
@@ -100,7 +104,7 @@ if gene_file and vector_file:
             st.info(f"目的遺伝子: {gene_rec.id} ({len(gene_rec.seq)} bp)")
             st.info(f"バックボーン: {vector_rec.id} ({len(vector_rec.seq)} bp)")
             
-            # 制限酵素解析（修正済みロジック）
+            # 制限酵素解析
             analysis = Analysis(AllEnzymes, vector_rec.seq)
             all_cuts = analysis.full()
             unique_sites = [str(enzyme) for enzyme, cuts in all_cuts.items() if len(cuts) == 1]
@@ -118,7 +122,7 @@ if gene_file and vector_file:
         
         with col2:
             st.write("プレビュー: 合成後のベクターマップ")
-            # 修正：挿入位置と長さを渡して特徴量を作成
+            # 修正した関数を呼び出し
             fig = generate_vector_map(final_dna_seq, insert_pos, len(gene_rec.seq))
             st.pyplot(fig)
 
