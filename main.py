@@ -8,7 +8,6 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
 from Bio.Restriction import Analysis, AllEnzymes
-# 修正：CircularGraphicRecord を追加インポート
 from dna_features_viewer import BiopythonTranslator, CircularGraphicRecord
 import py3Dmol
 from stmol import showmol
@@ -35,33 +34,35 @@ def get_esmfold_data(protein_seq):
 def render_mol(pdb_data):
     view = py3Dmol.view(width=800, height=600)
     view.addModel(pdb_data, 'pdb')
-    # pLDDTに基づいた色分け: 50(赤)〜90(青)
     view.setStyle({'cartoon': {'colorscheme': {'prop':'b', 'gradient': 'roygb', 'min': 50, 'max': 90}}})
     view.zoomTo()
     return view
 
-def generate_vector_map(final_seq, insert_pos, insert_len, label="New_Construct"):
-    """円形マップを正しく生成する"""
+def generate_vector_map(final_seq, insert_pos, insert_len, analysis_results=None, label="New_Construct"):
+    """円形マップにアノテーションと制限酵素サイトを表示する"""
     record = SeqRecord(Seq(final_seq), id="Vector", name=label)
+    features = []
     
-    # 特徴量（アノテーション）の定義
-    feat1 = SeqFeature(FeatureLocation(0, insert_pos), type="backbone", qualifiers={"label": "Backbone_A", "color": "#f4f4f4"})
-    feat2 = SeqFeature(FeatureLocation(insert_pos, insert_pos + insert_len), type="insert", qualifiers={"label": "TARGET GENE", "color": "#ffaa00"})
-    feat3 = SeqFeature(FeatureLocation(insert_pos + insert_len, len(final_seq)), type="backbone", qualifiers={"label": "Backbone_B", "color": "#f4f4f4"})
-    record.features = [feat1, feat2, feat3]
+    # 基本構成のアノテーション
+    features.append(SeqFeature(FeatureLocation(0, insert_pos), type="backbone", qualifiers={"label": "Backbone_A", "color": "#f4f4f4"}))
+    features.append(SeqFeature(FeatureLocation(insert_pos, insert_pos + insert_len), type="insert", qualifiers={"label": "TARGET GENE", "color": "#ffaa00"}))
+    features.append(SeqFeature(FeatureLocation(insert_pos + insert_len, len(final_seq)), type="backbone", qualifiers={"label": "Backbone_B", "color": "#f4f4f4"}))
     
-    # Translatorを使って標準的なGraphicRecordを一度作成し、特徴量を抽出
+    # 制限酵素サイトの自動プロット
+    if analysis_results:
+        for enzyme, cuts in analysis_results.items():
+            if len(cuts) == 1:
+                pos = cuts[0]
+                # 挿入位置より後ろにあるサイトは、インサートの長さ分だけ位置をずらす
+                actual_pos = pos if pos <= insert_pos else pos + insert_len
+                features.append(SeqFeature(FeatureLocation(actual_pos-1, actual_pos), type="restriction_site", qualifiers={"label": str(enzyme), "color": "#d62728"}))
+    
+    record.features = features
     translator = BiopythonTranslator()
     graphic_record = translator.translate_record(record)
     
-    # 【重要】円形マップ専用のクラスに変換
-    circular_rec = CircularGraphicRecord(
-        sequence_length=len(final_seq),
-        features=graphic_record.features
-    )
-    
-    fig, ax = plt.subplots(figsize=(8, 8))
-    # plot() を呼び出すと、CircularGraphicRecord なので円形に描画される
+    circular_rec = CircularGraphicRecord(sequence_length=len(final_seq), features=graphic_record.features)
+    fig, ax = plt.subplots(figsize=(10, 10))
     circular_rec.plot(ax=ax)
     return fig
 
@@ -104,26 +105,25 @@ if gene_file and vector_file:
             st.info(f"目的遺伝子: {gene_rec.id} ({len(gene_rec.seq)} bp)")
             st.info(f"バックボーン: {vector_rec.id} ({len(vector_rec.seq)} bp)")
             
-            # 制限酵素解析
             analysis = Analysis(AllEnzymes, vector_rec.seq)
             all_cuts = analysis.full()
-            unique_sites = [str(enzyme) for enzyme, cuts in all_cuts.items() if len(cuts) == 1]
-            unique_sites.sort()
+            unique_sites = sorted([str(enzyme) for enzyme, cuts in all_cuts.items() if len(cuts) == 1])
             
             if unique_sites:
                 selected_site = st.selectbox("利用可能なユニーク制限酵素サイト:", unique_sites)
+                # 選択された酵素の切断位置をデフォルトの挿入位置として提案
+                target_enzyme = [e for e in AllEnzymes if str(e) == selected_site][0]
+                suggested_pos = target_enzyme.search(vector_rec.seq)[0]
+                insert_pos = st.number_input("挿入位置 (bp) の指定", value=suggested_pos, max_value=len(vector_rec.seq))
             else:
-                st.warning("ユニーク制限酵素サイトが見つかりませんでした。")
-            
-            insert_pos = st.number_input("挿入位置 (bp) の指定", value=0, max_value=len(vector_rec.seq))
+                st.warning("ユニーク制限酵素サイトが見たかりませんでした。")
+                insert_pos = st.number_input("挿入位置 (bp) の指定", value=0)
         
-        # 配列の結合
         final_dna_seq = str(vector_rec.seq[:insert_pos]) + str(gene_rec.seq) + str(vector_rec.seq[insert_pos:])
         
         with col2:
-            st.write("プレビュー: 合成後のベクターマップ")
-            # 修正した関数を呼び出し
-            fig = generate_vector_map(final_dna_seq, insert_pos, len(gene_rec.seq))
+            st.write("プレビュー: 合成後のベクターマップ (制限酵素サイト付き)")
+            fig = generate_vector_map(final_dna_seq, insert_pos, len(gene_rec.seq), all_cuts)
             st.pyplot(fig)
 
         st.divider()
@@ -141,12 +141,7 @@ if gene_file and vector_file:
                     with res_col1:
                         st.metric("平均 pLDDT", f"{plddt:.2f}")
                         excel_data = export_to_excel(final_dna_seq, protein_seq, plddt, fig)
-                        st.download_button(
-                            label="レポートをExcelでダウンロード",
-                            data=excel_data,
-                            file_name="Vector2Fold_Report.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
+                        st.download_button(label="レポートをExcelでダウンロード", data=excel_data, file_name="Vector2Fold_Report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                     with res_col2:
                         st.write("予測3D構造 (Color by pLDDT)")
                         showmol(render_mol(pdb_data), height=500, width=700)
