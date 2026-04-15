@@ -354,7 +354,7 @@ def generate_protocol_pdf(
     pdf.section_title("IV. Ligation")
 
     is_blunt = (selected_enzyme and
-                ENZYME_CONDITIONS.get(selected_enzyme, {}).get("overhang", "") == "blunt")
+                ENZYME_CONDITIONS.get(selected_enzyme, {}).get("overhang", "").startswith("Blunt"))
     lig_key = "blunt_end" if is_blunt else "sticky_end"
     lig = LIGATION_PROTOCOLS[lig_key]
 
