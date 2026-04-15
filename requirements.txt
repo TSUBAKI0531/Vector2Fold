@@ -1,0 +1,10 @@
+Cython
+streamlit
+biopython
+pandas
+requests
+py3Dmol
+dna_features_viewer
+XlsxWriter
+matplotlib
+fpdf2

@@ -1,0 +1,24 @@
+# --- Python 関連 ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# --- Streamlit 関連 ---
+.streamlit/
+static/
+
+# --- バイオインフォマティクス・プロジェクト固有 ---
+# 解析用の一時的な入力ファイルや巨大な結果ファイルを除外
+input.fasta
+analysis_results.csv
+*.pdb
+
+# --- OS・エディタ関連 ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
