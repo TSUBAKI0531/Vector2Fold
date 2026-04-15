@@ -445,4 +445,4 @@ def generate_protocol_pdf(
          "Re-digest; use phosphatase (CIP/SAP)"],
     ], col_widths=[45, 50, 95])
 
-    return pdf.output()
+    return bytes(pdf.output())
